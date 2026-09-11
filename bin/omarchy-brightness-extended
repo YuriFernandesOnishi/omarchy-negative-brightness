@@ -1,0 +1,153 @@
+#!/bin/bash
+
+# Uso: omarchy-brightness-extended <monitor> {up|down|max|min|set <-70..100>}
+# <monitor> pode ser vazio ("") para usar o monitor focado (compat).
+
+monitor="${1:-}"
+action="${2:-}"
+value="${3:-}"
+
+if [[ -z "$monitor" ]]; then
+    monitor="$(omarchy-hyprland-monitor-focused)"
+fi
+
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy-brightness"
+mkdir -p "$STATE_DIR"
+
+state_file="$STATE_DIR/$monitor"
+# Marca se o hardware já foi baixado para o piso físico (1%). Evita repetir
+# o round-trip DDC/CI (lento, sobretudo no monitor secundário) a cada ajuste
+# de gamma quando o brilho já está abaixo de 0%.
+hwfloor_file="$STATE_DIR/${monitor}.hwfloor"
+
+set_gamma() {
+    local value="$1"
+
+    hyprctl hyprgamma:set "$monitor" brightness "$value" >/dev/null
+}
+
+set_hardware() {
+    local value="$1"
+
+    omarchy-brightness-display \
+        --monitor "$monitor" \
+        "$value%"
+}
+
+show_osd() {
+    local value="$1"
+
+    omarchy-osd -i brightness -p "$value" >/dev/null 2>&1 || true
+}
+
+# ---------------------------------------------------------
+# INICIALIZAÇÃO
+# ---------------------------------------------------------
+
+if [[ ! -f "$state_file" ]]; then
+    echo "100" > "$state_file"
+fi
+
+current="$(cat "$state_file")"
+
+if ! [[ "$current" =~ ^-?[0-9]+$ ]]; then
+    current=100
+fi
+
+# ---------------------------------------------------------
+# AÇÃO
+# ---------------------------------------------------------
+
+case "$action" in
+
+    up)
+        if (( current < 100 )); then
+            current=$((current + 1))
+        fi
+        ;;
+
+    down)
+        if (( current > -70 )); then
+            current=$((current - 1))
+        fi
+        ;;
+
+    max)
+        current=100
+        ;;
+
+    min)
+        current=-70
+        ;;
+
+    set)
+        target="$value"
+        if ! [[ "$target" =~ ^-?[0-9]+$ ]]; then
+            echo "Uso: $0 <monitor> set <-70..100>"
+            exit 1
+        fi
+        current="$target"
+        (( current < -70 )) && current=-70
+        (( current > 100 )) && current=100
+        ;;
+
+    *)
+        echo "Uso: $0 <monitor> {up|down|max|min|set <-70..100>}"
+        exit 1
+        ;;
+
+esac
+
+# ---------------------------------------------------------
+# BRILHO NORMAL — 1% A 100%
+# ---------------------------------------------------------
+
+if (( current >= 1 )); then
+
+    # Remove qualquer redução anterior do gamma.
+    set_gamma 1.0
+
+    # Brilho físico via DDC.
+    set_hardware "$current"
+    rm -f "$hwfloor_file"
+
+# ---------------------------------------------------------
+# ABAIXO DO MÍNIMO FÍSICO
+# ---------------------------------------------------------
+
+else
+
+    # Mantém o monitor no mínimo físico — só manda o comando DDC uma vez
+    # (é lento, sobretudo no monitor secundário) e não a cada ajuste de gamma.
+    if [[ ! -f "$hwfloor_file" ]]; then
+        set_hardware 1
+        touch "$hwfloor_file"
+    fi
+
+    # Mapeia:
+    #
+    #   0    -> 1.00
+    #  -10   -> 0.90
+    #  -25   -> 0.75
+    #  -50   -> 0.50
+    #  -70   -> 0.30 (mínimo)
+    #
+    gamma="$(awk -v value="$current" 'BEGIN {
+        g = 1 + (value / 100)
+
+        if (g < 0)
+            g = 0
+
+        if (g > 1)
+            g = 1
+
+        printf "%.2f", g
+    }')"
+
+    set_gamma "$gamma"
+
+fi
+
+echo "$current" > "$state_file"
+
+show_osd "$current"

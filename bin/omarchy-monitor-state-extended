@@ -1,0 +1,42 @@
+#!/bin/bash
+
+# Wraps omarchy-monitor-state, replacing the hardware-only brightness (0-100)
+# on line 1 with the extended value (-70..100) tracked by
+# omarchy-brightness-extended for the currently focused monitor, and appends
+# a JSON map of that value for every monitor so the shell panel can offer a
+# per-monitor selector without needing a fresh read per switch.
+
+out="$(omarchy-monitor-state)"
+mapfile -t lines <<< "$out"
+
+focused="${lines[5]:-}"
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy-brightness"
+
+if [[ -n "$focused" && -f "$STATE_DIR/$focused" ]]; then
+    ext="$(cat "$STATE_DIR/$focused")"
+    if [[ "$ext" =~ ^-?[0-9]+$ ]]; then
+        lines[0]="$ext"
+    fi
+fi
+
+map="{"
+first=1
+if [[ -d "$STATE_DIR" ]]; then
+    for f in "$STATE_DIR"/*; do
+        [[ -f "$f" ]] || continue
+        name="$(basename "$f")"
+        [[ "$name" == *.hwfloor ]] && continue
+        val="$(cat "$f")"
+        [[ "$val" =~ ^-?[0-9]+$ ]] || continue
+        if (( first )); then
+            first=0
+        else
+            map+=","
+        fi
+        map+="\"${name}\":${val}"
+    done
+fi
+map+="}"
+
+printf '%s\n' "${lines[@]}"
+printf '%s\n' "$map"
